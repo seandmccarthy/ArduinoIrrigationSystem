@@ -6,9 +6,21 @@
 #include <JsonParser.h>
 
 #define STATIONS 4
+
+#define NAME_LENGTH 3
+#define VALUE_LENGTH 2
+#define MAX_PARAMS 2
 #define PREFIX ""
 
+#define ON 1
+#define OFF 0
+
+const unsigned long status_frequency = 60000; // every 60 seconds
+unsigned long lastStatusSendTime;
+unsigned long currentTime;
+
 WebServer webserver(PREFIX, 80);
+PubSubClient client(server, 1883, callback, ethClient);
 
 byte stationRelays[STATIONS] =  {
   2, /* RELAY 1 */
@@ -22,13 +34,16 @@ IPAddress host_ip(10, 0, 1, 201);
 
 void stationCmd(WebServer &server, WebServer::ConnectionType type, char *url_tail, bool tail_complete) {
   int id;
-  bool setState = false;
   int state;
   
-  getParameters(server, &url_tail, id, state); 
+  getParametersFromRequest(id, state, server, &url_tail);
+  if (!validStation(id)) {
+    server.httpFail();
+    return;
+  }
 
   server.httpSuccess();
-  if (validState(state)) {
+  if (hasState(state)) {
     setStationRelayState(id, state);
   }
   else {
@@ -36,35 +51,44 @@ void stationCmd(WebServer &server, WebServer::ConnectionType type, char *url_tai
   }
 }
 
-bool validState(int state) {
-  return state == 0 || state == 1;
+bool hasState(int state) {
+  return state == OFF || state == ON;
 }
 
-void getParameters(WebServer &server, char **url_tail, int& id, int& state) {
+void getParametersFromRequest(int& id, int& state, WebServer &server, char **url_tail) {
   URLPARAM_RESULT rc;
-  char name[3], value[2];
-  for (;;) {
-    rc = server.nextURLparam(url_tail, name, 3, value, 2);
+  char name[NAME_LENGTH];
+  char value[VALUE_LENGTH];
+  int maxParams = MAX_PARAMS;
+
+  while (maxParams > 0) {
+    rc = server.nextURLparam(url_tail, name, NAME_LENGTH, value, VALUE_LENGTH);
     if (rc == URLPARAM_EOS) {
       break;
     }
    
     if (strcmp(name, "id") == 0) {
       id = atoi(value);
-      if (id < 1 || id > STATIONS) {
-        return;
-      }
     }
     else if (strcmp(name, "on") == 0) {
-      state = atoi(value);
-      if (state > 1) {
-        state = 1;
-      }
+      state = atoi(value) == 1 ? ON : OFF;
     }
+    maxParams--;
+  }
+}
+
+bool validStation(int id) {
+  return (id >= 1 && id <= STATIONS);
+}
+
+void turnAllStationsOff() {
+  for (int station=1; station <= STATIONS; station++) {
+    setStationRelayState(station, OFF);
   }
 }
 
 void setup() {
+  Serial.begin(9600);
   for(int i = 0; i < STATIONS; i++) {
     pinMode(stationRelays[i], OUTPUT);
   }
@@ -72,11 +96,15 @@ void setup() {
   webserver.setDefaultCommand(&stationCmd);
   webserver.addCommand("station", &stationCmd);
   webserver.begin();
+  lastStatusSendTime = 0;
 }
 
 void loop() {
   while(true) {
     webserver.processConnection();
+    if (isStatusDue()) {
+      sendStatus();
+    }
     delay(10);
   }
 }
@@ -90,11 +118,18 @@ int getStationRelayState(int stationID) {
 }
 
 bool stationOn(int stationID) {
-  return digitalRead(stationRelays[stationID-1]) == 1;
+  return digitalRead(stationRelays[stationID-1]) == ON;
 }
 
 bool stationOff(int stationID) {
   return !stationOn(stationID);
 }
 
+bool isStatusDue() {
+  currentTime = millis();
+  return (abs(currentTime - lastStatusSendTime) > status_frequency);
+}
+
+void sendStatus() {
+}
 
